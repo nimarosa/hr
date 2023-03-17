@@ -1,5 +1,5 @@
 # Copyright 2019 Tecnativa - Pedro M. Baeza
-# Copyright 2022 Tecnativa - Víctor Martínez
+# Copyright 2022-2023 Tecnativa - Víctor Martínez
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
 from odoo import _, api, fields, models
@@ -45,6 +45,7 @@ class HrEmployee(models.Model):
         comodel_name="hr.employee.calendar",
         inverse_name="employee_id",
         string="Calendar planning",
+        copy=True,
     )
 
     def _regenerate_calendar(self):
@@ -97,6 +98,7 @@ class HrEmployee(models.Model):
                         + " %s" % self.name,
                         "attendance_ids": vals_list,
                         "two_weeks_calendar": two_weeks,
+                        "tz": self.tz,  # take employee timezone as default
                     }
                 )
                 .id
@@ -105,13 +107,49 @@ class HrEmployee(models.Model):
             self.resource_calendar_id.attendance_ids = vals_list
         # Set the hours per day to the last (top date end) calendar line to apply
         if self.calendar_ids:
-            self.resource_calendar_id.hours_per_day = self.calendar_ids[
+            self.resource_id.calendar_id.hours_per_day = self.calendar_ids[
                 0
             ].calendar_id.hours_per_day
+            # set global leaves
+            self.resource_id.calendar_id.global_leave_ids = [
+                (
+                    6,
+                    0,
+                    self.copy_global_leaves(),
+                )
+            ]
+
+    def copy_global_leaves(self):
+        self.ensure_one()
+        leave_ids = []
+        for calendar in self.calendar_ids:
+            global_leaves = calendar.calendar_id.global_leave_ids
+            if calendar.date_start:
+                global_leaves = global_leaves.filtered(
+                    lambda x: x.date_from.date() >= calendar.date_start
+                )
+            if calendar.date_end:
+                global_leaves = global_leaves.filtered(
+                    lambda x: x.date_to.date() <= calendar.date_end
+                )
+            leave_ids += global_leaves.ids
+        vals = [
+            leave.copy_data({})[0]
+            for leave in self.env["resource.calendar.leaves"].browse(leave_ids)
+        ]
+        return self.env["resource.calendar.leaves"].create(vals).ids
 
     def regenerate_calendar(self):
         for item in self:
             item._regenerate_calendar()
+
+    def copy(self, default=None):
+        self.ensure_one()
+        new = super().copy(default)
+        # Define a good main calendar for being able to regenerate it later
+        new.resource_id.calendar_id = fields.first(new.calendar_ids).calendar_id
+        new.filtered("calendar_ids").regenerate_calendar()
+        return new
 
     @api.model_create_multi
     def create(self, vals_list):
